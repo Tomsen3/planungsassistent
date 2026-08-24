@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Planungsassistent</title>
+
+  <!-- MSAL per CDN, kein npm/Build-Schritt nötig - passt zu deinem bisherigen Muster -->
+  <script src="https://alcdn.msauth.net/browser/3.18.0/js/msal-browser.min.js"></script>
+
+  <!-- Supabase, falls du es hier auch direkt einbindest (Beispiel-URL, ggf. anpassen) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <h1>Planungsassistent</h1>
+
+  <button id="btn-outlook-login">Mit Outlook verbinden</button>
+  <div id="status"></div>
+  <pre id="events-output"></pre>
+
+  <script>
+    // ---- MSAL-Konfiguration ----
+    const msalConfig = {
+      auth: {
+        clientId: "6a501362-0f3b-4539-8770-571cbe8391fb", // Anwendungs-ID (Client)
+        authority: "https://login.microsoftonline.com/de892c68-3566-4c20-9037-e715f28f86ac", // Verzeichnis-ID (Mandant)
+        redirectUri: window.location.origin + window.location.pathname, // funktioniert lokal wie auf GitHub Pages, solange die URI in Entra hinterlegt ist
+      },
+      cache: {
+        cacheLocation: "sessionStorage",
+        storeAuthStateInCookie: false,
+      },
+    };
+
+    const graphScopes = ["User.Read", "Mail.ReadWrite", "Calendars.ReadWrite", "offline_access"];
+
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+
+    async function initMsal() {
+      await msalInstance.initialize();
+      await msalInstance.handleRedirectPromise();
+    }
+
+    async function loginOutlook() {
+      try {
+        const result = await msalInstance.loginPopup({ scopes: graphScopes });
+        document.getElementById("status").textContent = "Verbunden als: " + result.account.username;
+        return result.account;
+      } catch (error) {
+        console.error("Outlook-Login fehlgeschlagen:", error);
+        document.getElementById("status").textContent = "Login fehlgeschlagen: " + error.message;
+      }
+    }
+
+    async function getAccessToken() {
+      const account = msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0];
+      if (!account) throw new Error("Kein angemeldeter Outlook-Account. Erst einloggen.");
+
+      try {
+        const result = await msalInstance.acquireTokenSilent({ scopes: graphScopes, account });
+        return result.accessToken;
+      } catch (error) {
+        const result = await msalInstance.acquireTokenPopup({ scopes: graphScopes });
+        return result.accessToken;
+      }
+    }
+
+    async function getTodayEvents() {
+      const token = await getAccessToken();
+      const now = new Date();
+      const startOfDay = new Date(now.setHours(0, 0, 0, 0)).toISOString();
+      const endOfDay = new Date(now.setHours(23, 59, 59, 999)).toISOString();
+
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${startOfDay}&endDateTime=${endOfDay}`,
+        { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="Europe/Berlin"' } }
+      );
+
+      if (!response.ok) throw new Error(`Graph-API-Fehler: ${response.status}`);
+      const data = await response.json();
+      return data.value;
+    }
+
+    // ---- App-Start ----
+    document.getElementById("btn-outlook-login").addEventListener("click", async () => {
+      await loginOutlook();
+      const events = await getTodayEvents();
+      document.getElementById("events-output").textContent = JSON.stringify(events, null, 2);
+    });
+
+    initMsal();
+  </script>
+</body>
+</html>
