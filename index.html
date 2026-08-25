@@ -22,9 +22,26 @@
 
   <h1>Planungsassistent</h1>
 
-  <button id="btn-outlook-login">Mit Outlook verbinden</button>
-  <div id="status"></div>
-  <pre id="events-output"></pre>
+  <!--
+    TAGESBRIEFING
+    Kombiniert heutige Outlook-Termine und offene Aufgaben an einem Ort.
+    Termine: MSAL-Login direkt gegen Microsoft Graph (Frontend).
+    Aufgaben: laufen über die Edge Functions "aufgaben-abrufen" und
+    "aufgabe-status-aktualisieren" (Service-Role-Key serverseitig) -
+    der Anon-Key im Frontend hat keinen direkten DB-Zugriff.
+  -->
+  <div id="tagesbriefing-bereich" style="margin-top: 2rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h2>Tagesbriefing</h2>
+
+    <h3>Termine heute</h3>
+    <button id="btn-outlook-login">Mit Outlook verbinden</button>
+    <div id="status"></div>
+    <div id="termine-liste"></div>
+
+    <h3 style="margin-top: 1.5rem;">Offene Aufgaben</h3>
+    <button id="btn-aufgaben-laden">🔄 Aktualisieren</button>
+    <div id="aufgaben-liste">Lade...</div>
+  </div>
 
   <script>
     // ---- MSAL-Konfiguration ----
@@ -89,28 +106,45 @@
       return data.value;
     }
 
+    // ---- Termine hübsch aufbereiten (statt Roh-JSON) ----
+    function formatZeit(dateTimeStr) {
+      if (!dateTimeStr) return "";
+      const match = dateTimeStr.match(/T(\d{2}):(\d{2})/);
+      return match ? `${match[1]}:${match[2]}` : "";
+    }
+
+    function renderTermine(events) {
+      const el = document.getElementById("termine-liste");
+      if (!events || events.length === 0) {
+        el.textContent = "Keine Termine heute.";
+        return;
+      }
+      el.innerHTML = "";
+      events.forEach((e) => {
+        const zeile = document.createElement("div");
+        zeile.style.cssText = "padding: 0.5rem 0; border-bottom: 1px solid #eee;";
+        const zeitraum = e.isAllDay
+          ? "Ganztägig"
+          : `${formatZeit(e.start && e.start.dateTime)}${e.end ? " - " + formatZeit(e.end.dateTime) : ""}`;
+        zeile.innerHTML = `<strong>${zeitraum}</strong> ${escapeHtml(e.subject || "(kein Titel)")}`;
+        el.appendChild(zeile);
+      });
+    }
+
     // ---- App-Start ----
     document.getElementById("btn-outlook-login").addEventListener("click", async () => {
       await loginOutlook();
-      const events = await getTodayEvents();
-      document.getElementById("events-output").textContent = JSON.stringify(events, null, 2);
+      try {
+        const events = await getTodayEvents();
+        renderTermine(events);
+      } catch (error) {
+        console.error(error);
+        document.getElementById("termine-liste").textContent = "Fehler beim Laden der Termine: " + error.message;
+      }
     });
 
     initMsal();
   </script>
-
-  <!--
-    TAGESBRIEFING / AUFGABEN-DASHBOARD
-    Zeigt alle offenen Aufgaben (Status nicht Erledigt/Gestrichen) und erlaubt
-    das direkte Ändern des Status. Läuft über die Edge Functions
-    "aufgaben-abrufen" und "aufgabe-status-aktualisieren" (Service-Role-Key
-    serverseitig) - der Anon-Key im Frontend hat keinen direkten DB-Zugriff.
-  -->
-  <div id="aufgaben-bereich" style="margin-top: 2rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
-    <h2>Tagesbriefing - Offene Aufgaben</h2>
-    <button id="btn-aufgaben-laden">🔄 Aktualisieren</button>
-    <div id="aufgaben-liste">Lade...</div>
-  </div>
 
   <script>
     const AUFGABEN_ABRUFEN_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/aufgaben-abrufen";
