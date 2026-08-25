@@ -12,6 +12,14 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+  <script>
+    // ---- Gemeinsame Supabase-Konfiguration (Diktat-Modul + Aufgaben-Dashboard) ----
+    // Öffentlicher Anon-Key fürs Frontend - kein Geheimnis, passt zum Architekturprinzip.
+    // Direkter Tabellenzugriff über diesen Key ist per RLS gesperrt; alle Zugriffe
+    // laufen über Edge Functions mit dem geschützten Service-Role-Key.
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh1Y2Z4bmJoeXFxeGllcmh0Z3N2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1ODAxMjcsImV4cCI6MjEwMzE1NjEyN30.1TsUlsObywCgzmSgL_dKivSKHpNmrISYDzXtIBfQjb0";
+  </script>
+
   <h1>Planungsassistent</h1>
 
   <button id="btn-outlook-login">Mit Outlook verbinden</button>
@@ -92,6 +100,108 @@
   </script>
 
   <!--
+    TAGESBRIEFING / AUFGABEN-DASHBOARD
+    Zeigt alle offenen Aufgaben (Status nicht Erledigt/Gestrichen) und erlaubt
+    das direkte Ändern des Status. Läuft über die Edge Functions
+    "aufgaben-abrufen" und "aufgabe-status-aktualisieren" (Service-Role-Key
+    serverseitig) - der Anon-Key im Frontend hat keinen direkten DB-Zugriff.
+  -->
+  <div id="aufgaben-bereich" style="margin-top: 2rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h2>Tagesbriefing - Offene Aufgaben</h2>
+    <button id="btn-aufgaben-laden">🔄 Aktualisieren</button>
+    <div id="aufgaben-liste">Lade...</div>
+  </div>
+
+  <script>
+    const AUFGABEN_ABRUFEN_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/aufgaben-abrufen";
+    const AUFGABE_STATUS_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/aufgabe-status-aktualisieren";
+    const STATUS_OPTIONEN = ["Offen", "In Arbeit", "Wartet", "Delegiert", "Verschoben", "Zu klären", "Erledigt", "Gestrichen"];
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text ?? "";
+      return div.innerHTML;
+    }
+
+    async function ladeAufgaben() {
+      const el = document.getElementById("aufgaben-liste");
+      el.textContent = "Lade...";
+      try {
+        const response = await fetch(AUFGABEN_ABRUFEN_URL, {
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+            "apikey": SUPABASE_ANON_KEY,
+          },
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Fehler ${response.status}`);
+        renderAufgaben(data.aufgaben || []);
+      } catch (error) {
+        console.error(error);
+        el.textContent = "Fehler beim Laden: " + error.message;
+      }
+    }
+
+    function renderAufgaben(aufgaben) {
+      const el = document.getElementById("aufgaben-liste");
+      if (aufgaben.length === 0) {
+        el.textContent = "Keine offenen Aufgaben. 🎉";
+        return;
+      }
+      el.innerHTML = "";
+      aufgaben.forEach((a) => {
+        const zeile = document.createElement("div");
+        zeile.style.cssText = "padding: 0.5rem 0; border-bottom: 1px solid #eee;";
+        const statusOptionsHtml = STATUS_OPTIONEN
+          .map((s) => `<option value="${s}" ${s === a.status ? "selected" : ""}>${s}</option>`)
+          .join("");
+        zeile.innerHTML = `
+          <strong>${escapeHtml(a.aufgabe)}</strong>
+          <span style="color: #888;">(${escapeHtml(a.bereich)}${a.prioritaet ? ", " + escapeHtml(a.prioritaet) : ""})</span><br>
+          ${a.naechster_schritt ? `<span>Nächster Schritt: ${escapeHtml(a.naechster_schritt)}</span><br>` : ""}
+          ${a.faelligkeit ? `<span>Fällig: ${escapeHtml(a.faelligkeit)}</span><br>` : ""}
+          Status: <select data-id="${a.id}" class="status-auswahl">${statusOptionsHtml}</select>
+        `;
+        el.appendChild(zeile);
+      });
+
+      document.querySelectorAll(".status-auswahl").forEach((select) => {
+        select.addEventListener("change", async (event) => {
+          const id = event.target.getAttribute("data-id");
+          const neuerStatus = event.target.value;
+          event.target.disabled = true;
+          await aufgabeStatusAktualisieren(id, neuerStatus);
+        });
+      });
+    }
+
+    async function aufgabeStatusAktualisieren(aufgabeId, neuerStatus) {
+      try {
+        const response = await fetch(AUFGABE_STATUS_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+            "apikey": SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify({ aufgabe_id: aufgabeId, neuer_status: neuerStatus }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Fehler ${response.status}`);
+        // Liste neu laden - erledigte/gestrichene Aufgaben verschwinden dann automatisch aus der Ansicht
+        await ladeAufgaben();
+      } catch (error) {
+        console.error(error);
+        alert("Fehler beim Speichern: " + error.message);
+      }
+    }
+
+    document.getElementById("btn-aufgaben-laden").addEventListener("click", ladeAufgaben);
+    ladeAufgaben(); // beim Öffnen der Seite direkt laden, kein Login nötig
+  </script>
+
+  <!--
     DIKTAT-MODUL
     Nutzt die Web Speech API (webkitSpeechRecognition) - läuft stabil auf Android Chrome.
     Wichtig: funktioniert nur über HTTPS (GitHub Pages erfüllt das) und braucht Mikrofon-Erlaubnis.
@@ -110,9 +220,6 @@
     // ---- Supabase-Konfiguration für die Diktat-Auswertung ----
     // Die echte Edge-Function-URL deines Projekts (xucfxnbhyqqxierhtgsv):
     const SUPABASE_FUNCTION_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/diktat-auswertung";
-    // TODO Tom: Anon/Publishable Key aus Supabase-Dashboard -> Settings -> API hier einsetzen.
-    // Das ist der öffentliche Key fürs Frontend, kein Geheimnis - passt zu deinem Architekturprinzip.
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh1Y2Z4bmJoeXFxeGllcmh0Z3N2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1ODAxMjcsImV4cCI6MjEwMzE1NjEyN30.1TsUlsObywCgzmSgL_dKivSKHpNmrISYDzXtIBfQjb0";
 
     // ---- Diktat-Zustand ----
     let recognition = null;
