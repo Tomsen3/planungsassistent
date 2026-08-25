@@ -63,18 +63,31 @@
 
     async function initMsal() {
       await msalInstance.initialize();
-      await msalInstance.handleRedirectPromise();
+      const response = await msalInstance.handleRedirectPromise();
+      if (response && response.account) {
+        msalInstance.setActiveAccount(response.account);
+      }
+
+      // Falls schon (oder gerade eben per Redirect) eingeloggt: direkt Termine laden
+      const account = msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0];
+      if (account) {
+        msalInstance.setActiveAccount(account);
+        document.getElementById("status").textContent = "Verbunden als: " + account.username;
+        try {
+          const events = await getTodayEvents();
+          renderTermine(events);
+        } catch (error) {
+          console.error(error);
+          document.getElementById("termine-liste").textContent = "Fehler beim Laden der Termine: " + error.message;
+        }
+      }
     }
 
     async function loginOutlook() {
-      try {
-        const result = await msalInstance.loginPopup({ scopes: graphScopes });
-        document.getElementById("status").textContent = "Verbunden als: " + result.account.username;
-        return result.account;
-      } catch (error) {
-        console.error("Outlook-Login fehlgeschlagen:", error);
-        document.getElementById("status").textContent = "Login fehlgeschlagen: " + error.message;
-      }
+      // Redirect-Flow statt Popup - robuster, weil Edge/Chrome-Tracking-Prevention
+      // die Popup-Kommunikation oft blockiert. Die Seite navigiert kurz weg und
+      // kommt danach automatisch wieder zurück (siehe initMsal oben).
+      await msalInstance.loginRedirect({ scopes: graphScopes });
     }
 
     async function getAccessToken() {
@@ -85,8 +98,7 @@
         const result = await msalInstance.acquireTokenSilent({ scopes: graphScopes, account });
         return result.accessToken;
       } catch (error) {
-        const result = await msalInstance.acquireTokenPopup({ scopes: graphScopes });
-        return result.accessToken;
+        await msalInstance.acquireTokenRedirect({ scopes: graphScopes });
       }
     }
 
@@ -134,13 +146,8 @@
     // ---- App-Start ----
     document.getElementById("btn-outlook-login").addEventListener("click", async () => {
       await loginOutlook();
-      try {
-        const events = await getTodayEvents();
-        renderTermine(events);
-      } catch (error) {
-        console.error(error);
-        document.getElementById("termine-liste").textContent = "Fehler beim Laden der Termine: " + error.message;
-      }
+      // Ab hier läuft kein Code mehr - die Seite navigiert zu Microsoft und
+      // kommt danach automatisch zurück (initMsal() lädt dann die Termine).
     });
 
     initMsal();
