@@ -261,6 +261,7 @@
     // ---- Supabase-Konfiguration für die Diktat-Auswertung ----
     // Die echte Edge-Function-URL deines Projekts (xucfxnbhyqqxierhtgsv):
     const SUPABASE_FUNCTION_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/diktat-auswertung";
+    const DIKTAT_UEBERNEHMEN_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/diktat-uebernehmen";
 
     // ---- Diktat-Zustand ----
     let recognition = null;
@@ -395,8 +396,6 @@
         const vorschlag = data.vorschlag;
 
         // WICHTIG: nur ANZEIGEN, nicht automatisch speichern - Änderungshoheit bleibt bei Tom.
-        // Der "Übernehmen"-Button speichert noch nicht in Supabase - das folgt im
-        // nächsten Schritt (PWA-Grundgerüst / Aufgabenliste).
         document.getElementById("diktat-ergebnis").innerHTML = `
           <p><strong>Vorschlag zur Bestätigung:</strong></p>
           <pre>${JSON.stringify(vorschlag, null, 2)}</pre>
@@ -404,9 +403,60 @@
           <button id="btn-diktat-verwerfen">Verwerfen</button>
         `;
         elStatus.textContent = "Auswertung abgeschlossen - bitte prüfen.";
+
+        document.getElementById("btn-diktat-uebernehmen").addEventListener("click", async () => {
+          await vorschlagUebernehmen(vorschlag);
+        });
+        document.getElementById("btn-diktat-verwerfen").addEventListener("click", () => {
+          document.getElementById("diktat-ergebnis").innerHTML = "";
+          elStatus.textContent = "Verworfen. Bereit für neues Diktat.";
+        });
       } catch (error) {
         console.error(error);
         elStatus.textContent = "Fehler bei der Auswertung: " + error.message;
+      }
+      aktualisiereButtons();
+    }
+
+    // ---- Übernahme-Phase ----
+    // Speichert den (ggf. schon bestätigten) Vorschlag über die Edge Function
+    // "diktat-uebernehmen" - erst hier landet wirklich etwas in der Datenbank.
+    async function vorschlagUebernehmen(vorschlag) {
+      const ergebnisEl = document.getElementById("diktat-ergebnis");
+      const uebernehmenBtn = document.getElementById("btn-diktat-uebernehmen");
+      if (uebernehmenBtn) uebernehmenBtn.disabled = true;
+      elStatus.textContent = "Wird gespeichert...";
+
+      try {
+        const response = await fetch(DIKTAT_UEBERNEHMEN_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+            "apikey": SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify(vorschlag),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || `Speichern fehlgeschlagen: ${response.status}`);
+        }
+
+        ergebnisEl.innerHTML = `<p>✅ Aufgabe gespeichert: <strong>${escapeHtml(data.aufgabe.aufgabe)}</strong></p>`;
+        elStatus.textContent = "Gespeichert. Bereit für neues Diktat.";
+        elText.value = "";
+        gesammelterText = "";
+
+        // Tagesbriefing-Aufgabenliste direkt aktualisieren, damit die neue Aufgabe sichtbar wird
+        if (typeof ladeAufgaben === "function") {
+          await ladeAufgaben();
+        }
+      } catch (error) {
+        console.error(error);
+        alert("Fehler beim Speichern: " + error.message);
+        elStatus.textContent = "Fehler beim Speichern: " + error.message;
+        if (uebernehmenBtn) uebernehmenBtn.disabled = false;
       }
       aktualisiereButtons();
     }
