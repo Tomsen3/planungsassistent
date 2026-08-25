@@ -90,5 +90,178 @@
 
     initMsal();
   </script>
+
+  <!--
+    DIKTAT-MODUL
+    Nutzt die Web Speech API (webkitSpeechRecognition) - läuft stabil auf Android Chrome.
+    Wichtig: funktioniert nur über HTTPS (GitHub Pages erfüllt das) und braucht Mikrofon-Erlaubnis.
+  -->
+  <div id="diktat-bereich" style="margin-top: 2rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h2>Diktat</h2>
+    <button id="btn-diktat-start">🎙️ Aufnahme starten</button>
+    <button id="btn-diktat-pause" disabled>⏸️ Pause</button>
+    <button id="btn-diktat-fertig" disabled>✅ Fertig &amp; auswerten</button>
+    <p id="diktat-status">Bereit.</p>
+    <textarea id="diktat-text" rows="8" style="width: 100%;" placeholder="Erkannter Text erscheint hier - du kannst ihn jederzeit manuell korrigieren."></textarea>
+    <div id="diktat-ergebnis"></div>
+  </div>
+
+  <script>
+    // ---- Supabase-Konfiguration für die Diktat-Auswertung ----
+    // Die echte Edge-Function-URL deines Projekts (xucfxnbhyqqxierhtgsv):
+    const SUPABASE_FUNCTION_URL = "https://xucfxnbhyqqxierhtgsv.supabase.co/functions/v1/diktat-auswertung";
+    // TODO Tom: Anon/Publishable Key aus Supabase-Dashboard -> Settings -> API hier einsetzen.
+    // Das ist der öffentliche Key fürs Frontend, kein Geheimnis - passt zu deinem Architekturprinzip.
+    const SUPABASE_ANON_KEY = "DEIN_ANON_KEY";
+
+    // ---- Diktat-Zustand ----
+    let recognition = null;
+    let diktatLaeuft = false;      // true = aktive Aufnahme (nicht pausiert)
+    let bewusstPausiert = false;   // unterscheidet Nutzer-Pause von Auto-Stopp durch Chrome
+    let gesammelterText = "";      // finaler Text über alle Segmente hinweg
+
+    const elStart = document.getElementById("btn-diktat-start");
+    const elPause = document.getElementById("btn-diktat-pause");
+    const elFertig = document.getElementById("btn-diktat-fertig");
+    const elStatus = document.getElementById("diktat-status");
+    const elText = document.getElementById("diktat-text");
+
+    function erstelleErkennung() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        elStatus.textContent = "Web Speech API wird von diesem Browser nicht unterstützt.";
+        return null;
+      }
+
+      const r = new SpeechRecognition();
+      r.lang = "de-DE";
+      r.continuous = true;      // läuft weiter, statt nach einem Satz zu stoppen
+      r.interimResults = true;  // zeigt Zwischenergebnisse live an (fühlt sich responsiver an)
+
+      r.onresult = (event) => {
+        let interimText = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const segment = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            gesammelterText += segment + " ";
+          } else {
+            interimText += segment;
+          }
+        }
+        elText.value = gesammelterText + interimText;
+      };
+
+      r.onerror = (event) => {
+        console.error("Spracherkennung-Fehler:", event.error);
+        if (event.error === "not-allowed") {
+          elStatus.textContent = "Mikrofon-Zugriff verweigert. Bitte in den Browser-Einstellungen erlauben.";
+          diktatLaeuft = false;
+          aktualisiereButtons();
+        }
+        // andere Fehler (z.B. "no-speech") werden über onend abgefangen und ggf. neu gestartet
+      };
+
+      r.onend = () => {
+        // Chrome beendet die Sitzung z.B. nach ca. 60s Stille automatisch.
+        // Nur neu starten, wenn WIR nicht bewusst pausiert/gestoppt haben.
+        if (diktatLaeuft && !bewusstPausiert) {
+          recognition = erstelleErkennung();
+          recognition.start();
+        }
+      };
+
+      return r;
+    }
+
+    function aktualisiereButtons() {
+      elStart.disabled = diktatLaeuft;
+      elPause.disabled = !diktatLaeuft && !bewusstPausiert;
+      elPause.textContent = bewusstPausiert ? "▶️ Fortsetzen" : "⏸️ Pause";
+      elFertig.disabled = gesammelterText.trim() === "" && elText.value.trim() === "";
+    }
+
+    elStart.addEventListener("click", () => {
+      gesammelterText = "";
+      elText.value = "";
+      bewusstPausiert = false;
+      diktatLaeuft = true;
+      recognition = erstelleErkennung();
+      if (recognition) {
+        recognition.start();
+        elStatus.textContent = "Aufnahme läuft...";
+      }
+      aktualisiereButtons();
+    });
+
+    elPause.addEventListener("click", () => {
+      if (!bewusstPausiert) {
+        // Pausieren
+        bewusstPausiert = true;
+        diktatLaeuft = false;
+        if (recognition) recognition.stop();
+        elStatus.textContent = "Pausiert.";
+      } else {
+        // Fortsetzen
+        bewusstPausiert = false;
+        diktatLaeuft = true;
+        recognition = erstelleErkennung();
+        if (recognition) recognition.start();
+        elStatus.textContent = "Aufnahme läuft...";
+      }
+      aktualisiereButtons();
+    });
+
+    elFertig.addEventListener("click", async () => {
+      diktatLaeuft = false;
+      bewusstPausiert = false;
+      if (recognition) recognition.stop();
+      elStatus.textContent = "Wird ausgewertet...";
+      aktualisiereButtons();
+
+      const finalerText = elText.value.trim();
+      await diktatAuswerten(finalerText);
+    });
+
+    // ---- Auswertungs-Phase ----
+    // Ruft die Supabase Edge Function auf, die serverseitig die Anthropic-API
+    // mit dem geschützten Secret Key aufruft. Der Anthropic-Key taucht hier NIE auf.
+    async function diktatAuswerten(text) {
+      try {
+        const response = await fetch(SUPABASE_FUNCTION_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+            "apikey": SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify({ diktat_text: text }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || `Auswertung fehlgeschlagen: ${response.status}`);
+        }
+
+        // Die Edge Function liefert { vorschlag: {...} }
+        const vorschlag = data.vorschlag;
+
+        // WICHTIG: nur ANZEIGEN, nicht automatisch speichern - Änderungshoheit bleibt bei Tom.
+        // Der "Übernehmen"-Button speichert noch nicht in Supabase - das folgt im
+        // nächsten Schritt (PWA-Grundgerüst / Aufgabenliste).
+        document.getElementById("diktat-ergebnis").innerHTML = `
+          <p><strong>Vorschlag zur Bestätigung:</strong></p>
+          <pre>${JSON.stringify(vorschlag, null, 2)}</pre>
+          <button id="btn-diktat-uebernehmen">In Aufgabenliste übernehmen</button>
+          <button id="btn-diktat-verwerfen">Verwerfen</button>
+        `;
+        elStatus.textContent = "Auswertung abgeschlossen - bitte prüfen.";
+      } catch (error) {
+        console.error(error);
+        elStatus.textContent = "Fehler bei der Auswertung: " + error.message;
+      }
+      aktualisiereButtons();
+    }
+  </script>
 </body>
 </html>
